@@ -1,11 +1,12 @@
 const express = require("express");
+const app = express();
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
-const app = express();
+const stripe = require("stripe")(process.env.PAYMENT_SECRET_KEY)
 const port = process.env.PORT || 5000;
-
+console.log(process.env.PAYMENT_SECRET_KEY)
 app.use(cors());
 app.use(express.json());
 
@@ -46,6 +47,7 @@ async function run() {
       .db("BistroBossDB")
       .collection("ReviewsItem");
     const cartCollection = client.db("BistroBossDB").collection("carts");
+    const paymentCollection = client.db("BistroBossDB").collection("payment");
 
     app.post("/jwt", (req, res) => {
       const user = req.body;
@@ -79,11 +81,12 @@ const verifyAdmin=async(req,res,next)=>{
     });
     app.post("/users", async (req, res) => {
       const users = req.body;
+      console.log(users)
       const query = { email: users.email };
       const existingUsers = await usersCollection.findOne(query);
       console.log("existing users", existingUsers);
       if (existingUsers) {
-        return res.send({ message: "user already exists" });
+        return res.json({ message: "user already exists" });
       }
       const result = await usersCollection.insertOne(users);
       res.send(result);
@@ -128,6 +131,18 @@ const verifyAdmin=async(req,res,next)=>{
       const result = await menuCollection.find().toArray();
       res.send(result);
     });
+    app.post("/menu",verifyJWT,verifyAdmin, async(req,res)=>{
+      const newItem=req.body
+      console.log(newItem)
+      const result=await menuCollection.insertOne(newItem)
+      res.send(result)
+    })
+    app.delete("/menu/:id",verifyJWT,verifyAdmin,async(req,res)=>{
+      const id=req.params.id
+      const query={_id: new ObjectId(id)}
+      const result=await menuCollection.deleteOne(query)
+      res.send(query)
+    })
     app.get("/reviews", async (req, res) => {
       const result = await reviewCollection.find().toArray();
       res.send(result);
@@ -161,6 +176,67 @@ const verifyAdmin=async(req,res,next)=>{
       const result = await cartCollection.deleteOne(query);
       res.send(result);
     });
+
+    //create payment intent
+    app.post('/create-payment-intent', verifyJWT, async (req, res) => {
+      const { price } = req.body;
+      const amount = parseInt(price * 100);
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      })
+    })
+    //payment related api
+    app.post("/payments",verifyJWT,async(req,res)=>{
+      const payment=req.body
+      console.log(payment)
+      const insertResult=await paymentCollection.insertOne(payment)
+      const query={_id:{$in: payment.cartItems.map(id=>new ObjectId(id))}}
+      const deleteResult=await cartCollection.deleteMany(query)
+      res.send({insertResult,deleteResult})
+    })
+
+    app.get("/admin-states",verifyJWT, verifyAdmin, async(req,res)=>{
+      const users=await usersCollection.estimatedDocumentCount()
+      const products=await menuCollection.estimatedDocumentCount()
+      const orders=await paymentCollection.estimatedDocumentCount()
+
+      //best way to get sum of the price field  is to use group and sum operator
+
+      // await paymentCollection.aggregate([
+      //   {
+      //     $group: {
+      //       _id: null,
+      //       total: { $sum: '$price' }
+      //     }
+      //   }
+      // ]).toArray()=>  We can do this using aggregate. Now we do this bangla system but in future we should try this.
+
+      const payments=await paymentCollection.find().toArray();
+      const revenue=payments.reduce((sum,payment)=>sum + payment.price,0)
+      res.send({revenue,users,products,orders})
+    })
+/* 
+----------------------------------
+BANGLA SYSTEM(SECOND BEST SOLUTION)
+----------------------------------
+1. Load all payments
+2. For each items,get the menuItems array
+3. For each item in the menuItems array get the menuItem from the menu collection.
+4. Put them in an array: allOrderedItems
+5. separate allOrderedItems by category using filter
+6. Now get the quantity by using length: pizzas.length
+7. For each category use reduce to get the total amount spend on this category
+*/
+
+    app.get("/orders-stats",async(req,res)=>{
+
+    })
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
